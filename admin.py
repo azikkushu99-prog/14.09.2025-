@@ -48,6 +48,18 @@ def create_cancel_edit_keyboard():
     return keyboard.as_markup()
 
 
+def create_photo_edit_keyboard(has_photo: bool = False):
+    keyboard = InlineKeyboardBuilder()
+
+    if has_photo:
+        keyboard.button(text="🗑️ Удалить фото", callback_data="admin_delete_photo")
+
+    keyboard.button(text="⏭️ Пропустить загрузку фото", callback_data="admin_skip_photo")
+    keyboard.button(text="❌ Отменить редактирование", callback_data="admin_cancel_edit")
+    keyboard.adjust(1)
+    return keyboard
+
+
 def create_main_menu_keyboard():
     builder = InlineKeyboardBuilder()
     buttons = [
@@ -69,6 +81,9 @@ def setup_admin_router(dp: Dispatcher):
     dp.include_router(admin_router)
 
     # Регистрируем обработчики в правильном порядке
+    admin_router.callback_query.register(cancel_edit_handler, F.data == "admin_cancel_edit")
+    admin_router.callback_query.register(skip_photo_handler, F.data == "admin_skip_photo")
+    admin_router.callback_query.register(delete_photo_handler, F.data == "admin_delete_photo")
     admin_router.callback_query.register(add_product_category_handler, F.data.startswith("admin_add_product_category_"))
     admin_router.callback_query.register(delete_category_handler, F.data.startswith("admin_delete_category_"))
     admin_router.callback_query.register(manage_products_handler, F.data.startswith("admin_manage_products_"))
@@ -76,7 +91,6 @@ def setup_admin_router(dp: Dispatcher):
     admin_router.callback_query.register(add_product_section_handler, F.data.startswith("admin_product_section_"))
     admin_router.callback_query.register(add_category_section_handler, F.data.startswith("admin_section_"))
     admin_router.callback_query.register(admin_callback_handler, F.data.startswith("admin_"))
-    admin_router.callback_query.register(cancel_edit_handler, F.data == "admin_cancel_edit")
 
     admin_router.message.register(admin_command, Command("admin"))
     admin_router.message.register(add_category_name_handler, AdminStates.ADD_CATEGORY_NAME)
@@ -147,7 +161,7 @@ async def admin_callback_handler(callback_query: types.CallbackQuery, state: FSM
             f"Текущее содержание:\n{content}\n\n"
             "Отправьте новый текст:",
             parse_mode=ParseMode.HTML,
-            reply_markup=create_cancel_edit_keyboard()  # Убрано .as_markup()
+            reply_markup=create_cancel_edit_keyboard()
         )
 
     elif action == "admin_add_category":
@@ -171,6 +185,35 @@ async def cancel_edit_handler(callback_query: types.CallbackQuery, state: FSMCon
     await callback_query.answer("Редактирование отменено")
 
 
+async def delete_photo_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    section = user_data.get('editing_section')
+
+    if not section:
+        await callback_query.answer("❌ Ошибка: не указан раздел для редактирования")
+        return
+
+    # Получаем текущий путь к фото
+    current_photo_path = db.get_section_photo(section)
+
+    # Удаляем фото из файловой системы
+    if current_photo_path and os.path.exists(current_photo_path):
+        try:
+            os.remove(current_photo_path)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении фото: {e}")
+
+    # Обновляем базу данных
+    db.update_section_photo(section, None)
+
+    await callback_query.message.edit_text(
+        "✅ Фото удалено! Текст раздела обновлен.",
+        reply_markup=create_back_to_admin_menu_keyboard()
+    )
+    await state.clear()
+    await callback_query.answer()
+
+
 async def edit_section_text_handler(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     section = user_data.get('editing_section')
@@ -183,9 +226,13 @@ async def edit_section_text_handler(message: types.Message, state: FSMContext):
     await state.update_data(new_content=message.text)
     await state.set_state(AdminStates.EDIT_SECTION_PHOTO)
 
+    # Проверяем, есть ли текущее фото
+    current_photo_path = db.get_section_photo(section)
+    has_photo = current_photo_path is not None and os.path.exists(current_photo_path)
+
     await message.answer(
-        "✅ Текст сохранен. Теперь отправьте новое фото для раздела или нажмите 'Пропустить'",
-        reply_markup=create_skip_photo_keyboard().as_markup()
+        "✅ Текст сохранен. Теперь отправьте новое фото для раздела или выберите действие:",
+        reply_markup=create_photo_edit_keyboard(has_photo).as_markup()
     )
 
 
@@ -202,7 +249,15 @@ async def edit_section_photo_handler(message: types.Message, state: FSMContext):
     # Сохраняем текст
     db.update_section_content(section, new_content)
 
-    # Обрабатываем фото, если оно есть
+    # Удаляем старое фото, если оно есть
+    old_photo_path = db.get_section_photo(section)
+    if old_photo_path and os.path.exists(old_photo_path):
+        try:
+            os.remove(old_photo_path)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении старого фото: {e}")
+
+    # Обрабатываем новое фото, если оно есть
     if message.photo:
         photo = message.photo[-1]
         photo_file = await message.bot.get_file(photo.file_id)
@@ -216,26 +271,17 @@ async def edit_section_photo_handler(message: types.Message, state: FSMContext):
 
         await message.answer(
             f"✅ Раздел '{'О магазине' if section == 'about_shop' else 'Акции и скидки'}' успешно обновлен с новым текстом и фото!",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
     else:
         await message.answer(
             f"✅ Раздел '{'О магазине' if section == 'about_shop' else 'Акции и скидки'}' успешно обновлен с новым текстом!",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
 
     await state.clear()
 
 
-def create_skip_photo_keyboard():
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="⏭️ Пропустить загрузку фото", callback_data="admin_skip_photo")
-    keyboard.button(text="❌ Отменить редактирование", callback_data="admin_cancel_edit")
-    keyboard.adjust(1)
-    return keyboard
-
-
-@admin_router.callback_query(F.data == "admin_skip_photo")
 async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     section = user_data.get('editing_section')
@@ -251,7 +297,7 @@ async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMCont
 
     await callback_query.message.edit_text(
         f"✅ Раздел '{'О магазине' if section == 'about_shop' else 'Акции и скидки'}' успешно обновлен с новым текстом!",
-        reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+        reply_markup=create_back_to_admin_menu_keyboard()
     )
 
     await state.clear()
@@ -263,7 +309,7 @@ async def start_add_category(callback_query: types.CallbackQuery, state: FSMCont
         "📝 <b>Добавление новой категории</b>\n\n"
         "Введите название категории:",
         parse_mode=ParseMode.HTML,
-        reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+        reply_markup=create_back_to_admin_menu_keyboard()
     )
     await state.set_state(AdminStates.ADD_CATEGORY_NAME)
 
@@ -295,12 +341,12 @@ async def add_category_section_handler(callback_query: types.CallbackQuery, stat
     if db.add_category(category_name, None, None, section):
         await callback_query.message.edit_text(
             f"✅ Категория '{category_name}' успешно добавлена в раздел '{section_name}'!",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
     else:
         await callback_query.message.edit_text(
             "❌ Не удалось добавить категорию. Возможно, категория с таким именем уже существует.",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
 
     await state.clear()
@@ -331,7 +377,7 @@ async def add_product_section_handler(callback_query: types.CallbackQuery, state
     if not categories:
         await callback_query.message.edit_text(
             f"❌ Нет доступных категорий в выбранном разделе. Сначала добавьте категорию в раздел {'оператора' if section == 'operator' else 'звезд'}.",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         await callback_query.answer()
         return
@@ -370,7 +416,7 @@ async def add_product_category_handler(callback_query: types.CallbackQuery, stat
         # Запрашиваем название товара
         await callback_query.message.edit_text(
             "📝 Введите название товара:",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         await state.set_state(AdminStates.ADD_PRODUCT_NAME)
 
@@ -379,7 +425,7 @@ async def add_product_category_handler(callback_query: types.CallbackQuery, stat
         await callback_query.answer("❌ Ошибка при выборе категории")
         await callback_query.message.edit_text(
             "❌ Произошла ошибка при выборе категории.",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
 
 
@@ -391,13 +437,13 @@ async def add_product_name_handler(message: types.Message, state: FSMContext):
     if section == "stars":
         await message.answer(
             "⭐ Введите цену товара в звездах (только число):",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         await state.set_state(AdminStates.ADD_PRODUCT_STARS_PRICE)
     else:
         await message.answer(
             "💵 Введите цену товара в рублях (только число):",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         await state.set_state(AdminStates.ADD_PRODUCT_PRICE)
 
@@ -414,7 +460,7 @@ async def add_product_price_handler(message: types.Message, state: FSMContext):
         if category_id is None or section is None:
             await message.answer(
                 "❌ Не выбрана категория или раздел. Попробуйте добавить товар еще раз.",
-                reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+                reply_markup=create_back_to_admin_menu_keyboard()
             )
             await state.clear()
             return
@@ -422,23 +468,23 @@ async def add_product_price_handler(message: types.Message, state: FSMContext):
         if db.add_product(name, "", price, 0, category_id, None, None, section):
             await message.answer(
                 f"✅ Товар '{name}' успешно добавлен в категорию!",
-                reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+                reply_markup=create_back_to_admin_menu_keyboard()
             )
         else:
             await message.answer(
                 "❌ Не удалось добавить товар в базу данных.",
-                reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+                reply_markup=create_back_to_admin_menu_keyboard()
             )
     except ValueError:
         await message.answer(
             "❌ Неверный формат цены. Введите число:",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
     except Exception as e:
         logger.error(f"Ошибка при добавлении товара: {e}")
         await message.answer(
             "❌ Произошла ошибка при добавлении товара.",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
 
     await state.clear()
@@ -451,13 +497,13 @@ async def add_product_stars_price_handler(message: types.Message, state: FSMCont
 
         await message.answer(
             "📋 Пришлите инструкцию для активации подписки:",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         await state.set_state(AdminStates.ADD_PRODUCT_INSTRUCTION)
     except ValueError:
         await message.answer(
-            "❌ Неверный формат цены. Введите целое число:",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            "❌ Неверный формат цена. Введите целое число:",
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
 
 
@@ -475,12 +521,12 @@ async def add_product_instruction_handler(message: types.Message, state: FSMCont
             f"✅ Товар '{name}' успешно добавлен в раздел 'Покупка за звезды'!\n"
             f"⭐ Цена: {stars_price} звёзд\n"
             f"📋 Инструкция: {instruction}",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
     else:
         await message.answer(
             "❌ Не удалось добавить товар в базу данных.",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
 
     await state.clear()
@@ -494,7 +540,7 @@ async def show_categories_management(callback_query: types.CallbackQuery):
             "🗑️ <b>Удаление категорий</b>\n\n"
             "Пока нет добавленных категорий.",
             parse_mode=ParseMode.HTML,
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         return
 
@@ -531,17 +577,17 @@ async def delete_category_handler(callback_query: types.CallbackQuery):
         if db.delete_category(category_id):
             await callback_query.message.edit_text(
                 f"✅ Категория '{category['name']}' и все её товары ({len(products)} шт.) успешно удалены!",
-                reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+                reply_markup=create_back_to_admin_menu_keyboard()
             )
         else:
             await callback_query.message.edit_text(
                 "❌ Не удалось удалить категорию.",
-                reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+                reply_markup=create_back_to_admin_menu_keyboard()
             )
     else:
         await callback_query.message.edit_text(
             "❌ Категория не найдена.",
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
 
     await callback_query.answer()
@@ -555,7 +601,7 @@ async def show_products_management(callback_query: types.CallbackQuery):
             "🗑️ <b>Удаление товары</b>\n\n"
             "Пока нет добавленных категорий.",
             parse_mode=ParseMode.HTML,
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         return
 
@@ -588,7 +634,7 @@ async def manage_products_handler(callback_query: types.CallbackQuery):
             f"🗑️ <b>Товары в категории: {category['name']}</b>\n\n"
             "Пока нет товаров в этой категории.",
             parse_mode=ParseMode.HTML,
-            reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+            reply_markup=create_back_to_admin_menu_keyboard()
         )
         return
 
@@ -621,7 +667,7 @@ async def delete_product_handler(callback_query: types.CallbackQuery):
         if db.delete_product(product_id):
             await callback_query.message.edit_text(
                 f"✅ Товар '{product['name']}' успешно удален!",
-                reply_markup=create_back_to_admin_menu_keyboard()  # Убрано .as_markup()
+                reply_markup=create_back_to_admin_menu_keyboard()
             )
         else:
             await callback_query.message.edit_text(
