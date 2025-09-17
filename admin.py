@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
+from aiogram.types import FSInputFile
 
 from db import db
 
@@ -26,8 +27,7 @@ class AdminStates(StatesGroup):
     ADD_CATEGORY_SECTION = State()
     ADD_PRODUCT_NAME = State()
     ADD_PRODUCT_PRICE = State()
-    ADD_PRODUCT_STARS_PRICE = State()
-    ADD_PRODUCT_INSTRUCTION = State()
+    ADD_PRODUCT_SBP_PRICE = State()
     ADD_PRODUCT_SECTION = State()
     EDIT_SECTION_TEXT = State()
     EDIT_SECTION_PHOTO = State()
@@ -64,16 +64,20 @@ def create_main_menu_keyboard():
     builder = InlineKeyboardBuilder()
     buttons = [
         ("📦 Покупка через оператора", "operator_categories"),
-        ("⭐ Покупка за звезды", "stars_categories"),
+        ("💳 Покупка через СБП", "sbp_categories"),
         ("🏪 О магазине", "about_shop"),
-        ("👤 Мой профиль", "profile"),
         ("🛟 Поддержка", "support"),
-        ("🎁 Акции и скидки", "promotions"),
-        ("⭐ Избранное", "favorites")
+        ("🎁 Акции и скидки", "promotions")
     ]
     for text, callback_data in buttons:
         builder.button(text=text, callback_data=callback_data)
     builder.adjust(2)
+    return builder.as_markup()
+
+
+def create_close_request_keyboard(order_id):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Закрыть заявку", callback_data=f"close_request_{order_id}")
     return builder.as_markup()
 
 
@@ -96,8 +100,7 @@ def setup_admin_router(dp: Dispatcher):
     admin_router.message.register(add_category_name_handler, AdminStates.ADD_CATEGORY_NAME)
     admin_router.message.register(add_product_name_handler, AdminStates.ADD_PRODUCT_NAME)
     admin_router.message.register(add_product_price_handler, AdminStates.ADD_PRODUCT_PRICE)
-    admin_router.message.register(add_product_stars_price_handler, AdminStates.ADD_PRODUCT_STARS_PRICE)
-    admin_router.message.register(add_product_instruction_handler, AdminStates.ADD_PRODUCT_INSTRUCTION)
+    admin_router.message.register(add_product_sbp_price_handler, AdminStates.ADD_PRODUCT_SBP_PRICE)
     admin_router.message.register(edit_section_text_handler, AdminStates.EDIT_SECTION_TEXT)
     admin_router.message.register(edit_section_photo_handler, AdminStates.EDIT_SECTION_PHOTO)
 
@@ -123,6 +126,7 @@ async def show_admin_menu(message: types.Message = None, callback_query: types.C
     keyboard.button(text="🛒 Добавить товар", callback_data="admin_add_product")
     keyboard.button(text="🗑️ Удаление категорий", callback_data="admin_manage_categories")
     keyboard.button(text="🗑️ Удаление товаров", callback_data="admin_manage_products")
+    keyboard.button(text="📄 Открытые заявки", callback_data="admin_pending_orders")
     keyboard.button(text="⬅️ Назад в главное меню", callback_data="admin_back_to_main")
     keyboard.adjust(1)
 
@@ -176,7 +180,54 @@ async def admin_callback_handler(callback_query: types.CallbackQuery, state: FSM
     elif action == "admin_manage_products":
         await show_products_management(callback_query)
 
+    elif action == "admin_pending_orders":
+        await show_pending_orders(callback_query)
+
     await callback_query.answer()
+
+
+async def show_pending_orders(callback_query: types.CallbackQuery):
+    orders = db.get_orders_by_status('pending')
+
+    if not orders:
+        await callback_query.message.edit_text(
+            "📄 <b>Открытые заявки</b>\n\nНа данный момент открытых заявок нет.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=create_back_to_admin_menu_keyboard()
+        )
+        return
+
+    # Отправляем каждую заявку отдельным сообщением
+    for order in orders:
+        product = db.get_product_by_id(order['product_id'])
+        category = db.get_category_by_id(product['category_id']) if product else None
+        category_name = category['name'] if category else 'Неизвестно'
+
+        caption = (
+            f"📄 <b>Заявка #{order['id']}</b>\n\n"
+            f"👤 Пользователь: @{order['username']}\n"
+            f"📦 Категория: {category_name}\n"
+            f"🛒 Товар: {product['name'] if product else 'Неизвестно'}\n"
+            f"💵 Сумма: {order['amount']} руб.\n"
+            f"🕒 Время: {order['created_at']}"
+        )
+
+        # Отправляем фото чека, если оно есть
+        if order['photo_path'] and os.path.exists(order['photo_path']):
+            await callback_query.message.answer_photo(
+                photo=FSInputFile(order['photo_path']),
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=create_close_request_keyboard(order['id'])
+            )
+        else:
+            await callback_query.message.answer(
+                caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=create_close_request_keyboard(order['id'])
+            )
+
+    await callback_query.answer("Все открытые заявки отправлены")
 
 
 async def cancel_edit_handler(callback_query: types.CallbackQuery, state: FSMContext):
@@ -320,7 +371,7 @@ async def add_category_name_handler(message: types.Message, state: FSMContext):
 
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="📦 Покупка через оператора", callback_data="admin_section_operator")
-    keyboard.button(text="⭐ Покупка за звезды", callback_data="admin_section_stars")
+    keyboard.button(text="💳 Покупка через СБП", callback_data="admin_section_sbp")
     keyboard.adjust(1)
 
     await message.answer(
@@ -336,7 +387,7 @@ async def add_category_section_handler(callback_query: types.CallbackQuery, stat
     user_data = await state.get_data()
     category_name = user_data.get('category_name')
 
-    section_name = "оператора" if section == "operator" else "звезд"
+    section_name = "оператора" if section == "operator" else "СБП"
 
     if db.add_category(category_name, None, None, section):
         await callback_query.message.edit_text(
@@ -356,7 +407,7 @@ async def add_category_section_handler(callback_query: types.CallbackQuery, stat
 async def start_add_product(callback_query: types.CallbackQuery, state: FSMContext):
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="📦 Покупка через оператора", callback_data="admin_product_section_operator")
-    keyboard.button(text="⭐ Покупка за звезды", callback_data="admin_product_section_stars")
+    keyboard.button(text="💳 Покупка через СБП", callback_data="admin_product_section_sbp")
     keyboard.adjust(1)
 
     await callback_query.message.edit_text(
@@ -376,7 +427,7 @@ async def add_product_section_handler(callback_query: types.CallbackQuery, state
 
     if not categories:
         await callback_query.message.edit_text(
-            f"❌ Нет доступных категорий в выбранном разделе. Сначала добавьте категорию в раздел {'оператора' if section == 'operator' else 'звезд'}.",
+            f"❌ Нет доступных категорий в выбранном разделе. Сначала добавьте категорию в раздел {'оператора' if section == 'operator' else 'СБП'}.",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
         await callback_query.answer()
@@ -434,12 +485,12 @@ async def add_product_name_handler(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     section = user_data.get('product_section')
 
-    if section == "stars":
+    if section == "sbp":
         await message.answer(
-            "⭐ Введите цену товара в звездах (только число):",
+            "💳 Введите цену товара в рублях для оплаты через СБП:",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
-        await state.set_state(AdminStates.ADD_PRODUCT_STARS_PRICE)
+        await state.set_state(AdminStates.ADD_PRODUCT_SBP_PRICE)
     else:
         await message.answer(
             "💵 Введите цену товара в рублях (только число):",
@@ -465,7 +516,7 @@ async def add_product_price_handler(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        if db.add_product(name, "", price, 0, category_id, None, None, section):
+        if db.add_product(name, "", price, 0, category_id, None, section):
             await message.answer(
                 f"✅ Товар '{name}' успешно добавлен в категорию!",
                 reply_markup=create_back_to_admin_menu_keyboard()
@@ -490,42 +541,35 @@ async def add_product_price_handler(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-async def add_product_stars_price_handler(message: types.Message, state: FSMContext):
+async def add_product_sbp_price_handler(message: types.Message, state: FSMContext):
     try:
-        stars_price = int(message.text)
-        await state.update_data(product_stars_price=stars_price)
+        sbp_price = int(message.text)
+        user_data = await state.get_data()
 
-        await message.answer(
-            "📋 Пришлите инструкцию для активации подписки:",
-            reply_markup=create_back_to_admin_menu_keyboard()
-        )
-        await state.set_state(AdminStates.ADD_PRODUCT_INSTRUCTION)
+        name = user_data.get('product_name')
+        category_id = user_data.get('product_category_id')
+        section = user_data.get('product_section')
+
+        if db.add_product(name, "", 0, sbp_price, category_id, None, section):
+            await message.answer(
+                f"✅ Товар '{name}' успешно добавлен в раздел 'Покупка через СБП'!\n"
+                f"💳 Цена: {sbp_price} руб.",
+                reply_markup=create_back_to_admin_menu_keyboard()
+            )
+        else:
+            await message.answer(
+                "❌ Не удалось добавить товар в базу данных.",
+                reply_markup=create_back_to_admin_menu_keyboard()
+            )
     except ValueError:
         await message.answer(
             "❌ Неверный формат цена. Введите целое число:",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
-
-
-async def add_product_instruction_handler(message: types.Message, state: FSMContext):
-    instruction = message.text
-    user_data = await state.get_data()
-
-    name = user_data.get('product_name')
-    stars_price = user_data.get('product_stars_price')
-    category_id = user_data.get('product_category_id')
-    section = user_data.get('product_section')
-
-    if db.add_product(name, "", 0, stars_price, category_id, instruction, None, section):
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении товара: {e}")
         await message.answer(
-            f"✅ Товар '{name}' успешно добавлен в раздел 'Покупка за звезды'!\n"
-            f"⭐ Цена: {stars_price} звёзд\n"
-            f"📋 Инструкция: {instruction}",
-            reply_markup=create_back_to_admin_menu_keyboard()
-        )
-    else:
-        await message.answer(
-            "❌ Не удалось добавить товар в базу данных.",
+            "❌ Произошла ошибка при добавлении товара.",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
 
@@ -549,7 +593,7 @@ async def show_categories_management(callback_query: types.CallbackQuery):
 
     for category in categories:
         products_count = len(db.get_products_by_category(category['id']))
-        section_name = "оператора" if category['section'] == 'operator' else "звезд"
+        section_name = "оператора" if category['section'] == 'operator' else "СБП"
         text += f"• {category['name']} (раздел: {section_name}, {products_count} товаров)\n"
         keyboard.button(text=f"🗑️ {category['name']}", callback_data=f"admin_delete_category_{category['id']}")
 
@@ -610,7 +654,7 @@ async def show_products_management(callback_query: types.CallbackQuery):
 
     for category in categories:
         products = db.get_products_by_category(category['id'])
-        section_name = "оператора" if category['section'] == 'operator' else "звезд"
+        section_name = "оператора" if category['section'] == 'operator' else "СБП"
         text += f"📦 {category['name']} (раздел: {section_name}, {len(products)} товаров)\n"
         keyboard.button(text=f"📋 {category['name']}", callback_data=f"admin_manage_products_{category['id']}")
 
@@ -645,7 +689,7 @@ async def manage_products_handler(callback_query: types.CallbackQuery):
         if product['section'] == 'operator':
             text += f"• {product['name']} - {product['price']} руб.\n"
         else:
-            text += f"• {product['name']} - {product['stars_price']} звёзд\n"
+            text += f"• {product['name']} - {product['stars_price']} руб.\n"
 
         keyboard.button(text=f"🗑️ {product['name']}", callback_data=f"admin_delete_product_{product['id']}")
 
