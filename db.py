@@ -1,7 +1,7 @@
 import sqlite3
 import os
 from typing import Optional, Dict, Any, List
-
+from datetime import datetime
 
 class Database:
     def __init__(self, db_name: str = 'bot_database.db'):
@@ -55,25 +55,23 @@ class Database:
                     price REAL NOT NULL,
                     stars_price INTEGER DEFAULT 0,
                     category_id INTEGER NOT NULL,
-                    activation_instruction TEXT,
                     photo_path TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (category_id) REFERENCES categories (id)
                 )
             ''')
 
-            # Таблица для хранения платежей через Stars
+            # Таблица заказов
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS star_payments (
+                CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
+                    username TEXT,
                     product_id INTEGER NOT NULL,
-                    amount INTEGER NOT NULL,
-                    telegram_payment_charge_id TEXT UNIQUE,
-                    provider_payment_charge_id TEXT,
-                    payload TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    amount REAL NOT NULL,
                     status TEXT DEFAULT 'pending',
+                    photo_path TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (product_id) REFERENCES products (id)
                 )
             ''')
@@ -99,12 +97,45 @@ class Database:
                 cursor.execute('ALTER TABLE products ADD COLUMN stars_price INTEGER DEFAULT 0')
                 print("Добавлена колонка stars_price в таблицу products")
 
-            # Проверяем и добавляем колонку activation_instruction в таблицу products если её нет
+            # Проверяем и добавляем колонку photo_path в таблицу orders если её нет
+            cursor.execute("PRAGMA table_info(orders)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if 'photo_path' not in columns:
+                cursor.execute('ALTER TABLE orders ADD COLUMN photo_path TEXT')
+                print("Добавлена колонка photo_path в таблицу orders")
+
+            # Удаляем колонку activation_instruction если она существует
             cursor.execute("PRAGMA table_info(products)")
             columns = [column[1] for column in cursor.fetchall()]
-            if 'activation_instruction' not in columns:
-                cursor.execute('ALTER TABLE products ADD COLUMN activation_instruction TEXT')
-                print("Добавлена колонка activation_instruction в таблицу products")
+            if 'activation_instruction' in columns:
+                cursor.execute('''
+                    CREATE TEMPORARY TABLE products_backup AS 
+                    SELECT id, name, description, price, stars_price, category_id, photo_path, section, created_at 
+                    FROM products
+                ''')
+                cursor.execute('DROP TABLE products')
+                cursor.execute('''
+                    CREATE TABLE products (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        description TEXT,
+                        price REAL NOT NULL,
+                        stars_price INTEGER DEFAULT 0,
+                        category_id INTEGER NOT NULL,
+                        photo_path TEXT,
+                        section TEXT DEFAULT "operator",
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (category_id) REFERENCES categories (id)
+                    )
+                ''')
+                cursor.execute('''
+                    INSERT INTO products 
+                    (id, name, description, price, stars_price, category_id, photo_path, section, created_at)
+                    SELECT id, name, description, price, stars_price, category_id, photo_path, section, created_at
+                    FROM products_backup
+                ''')
+                cursor.execute('DROP TABLE products_backup')
+                print("Удалена колонка activation_instruction из таблицы products")
 
             # Добавляем начальные данные для разделов
             default_sections = [
@@ -257,16 +288,16 @@ class Database:
             return cursor.rowcount > 0
 
     def add_product(self, name: str, description: str, price: float, stars_price: int, category_id: int,
-                    activation_instruction: str = None, photo_path: str = None, section: str = 'operator') -> bool:
+                    photo_path: str = None, section: str = 'operator') -> bool:
         """Добавить новый товар"""
         try:
             with sqlite3.connect(self.db_name) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     '''INSERT INTO products 
-                    (name, description, price, stars_price, category_id, activation_instruction, photo_path, section) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                    (name, description, price, stars_price, category_id, activation_instruction, photo_path, section)
+                    (name, description, price, stars_price, category_id, photo_path, section) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (name, description, price, stars_price, category_id, photo_path, section)
                 )
                 conn.commit()
                 return cursor.rowcount > 0
@@ -278,7 +309,7 @@ class Database:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                '''SELECT id, name, description, price, stars_price, category_id, activation_instruction, photo_path, section 
+                '''SELECT id, name, description, price, stars_price, category_id, photo_path, section 
                 FROM products WHERE id = ?''',
                 (product_id,)
             )
@@ -291,9 +322,8 @@ class Database:
                     "price": result[3],
                     "stars_price": result[4],
                     "category_id": result[5],
-                    "activation_instruction": result[6],
-                    "photo_path": result[7],
-                    "section": result[8]
+                    "photo_path": result[6],
+                    "section": result[7]
                 }
             return None
 
@@ -302,7 +332,7 @@ class Database:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                '''SELECT id, name, description, price, stars_price, category_id, activation_instruction, photo_path, section 
+                '''SELECT id, name, description, price, stars_price, category_id, photo_path, section 
                 FROM products WHERE category_id = ? ORDER BY name''',
                 (category_id,)
             )
@@ -313,9 +343,8 @@ class Database:
                 "price": row[3],
                 "stars_price": row[4],
                 "category_id": row[5],
-                "activation_instruction": row[6],
-                "photo_path": row[7],
-                "section": row[8]
+                "photo_path": row[6],
+                "section": row[7]
             } for row in cursor.fetchall()]
 
     def get_products_by_category_and_section(self, category_id: int, section: str) -> List[Dict[str, Any]]:
@@ -323,7 +352,7 @@ class Database:
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                '''SELECT id, name, description, price, stars_price, category_id, activation_instruction, photo_path, section 
+                '''SELECT id, name, description, price, stars_price, category_id, photo_path, section 
                 FROM products WHERE category_id = ? AND section = ? ORDER BY name''',
                 (category_id, section)
             )
@@ -334,9 +363,8 @@ class Database:
                 "price": row[3],
                 "stars_price": row[4],
                 "category_id": row[5],
-                "activation_instruction": row[6],
-                "photo_path": row[7],
-                "section": row[8]
+                "photo_path": row[6],
+                "section": row[7]
             } for row in cursor.fetchall()]
 
     def delete_product(self, product_id: int) -> bool:
@@ -360,95 +388,105 @@ class Database:
             )
             return cursor.fetchone() is not None
 
-    def create_star_payment(self, user_id: int, product_id: int, amount: int, payload: str) -> Optional[int]:
-        """Создать запись о платеже Stars"""
+    def create_order(self, user_id: int, username: str, product_id: int, amount: float, photo_path: str, status: str = 'pending') -> Optional[int]:
+        """Создать заказ"""
         try:
             with sqlite3.connect(self.db_name) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    '''INSERT INTO star_payments 
-                    (user_id, product_id, amount, payload) 
-                    VALUES (?, ?, ?, ?)''',
-                    (user_id, product_id, amount, payload)
+                    '''INSERT INTO orders (user_id, username, product_id, amount, status, photo_path)
+                    VALUES (?, ?, ?, ?, ?, ?)''',
+                    (user_id, username, product_id, amount, status, photo_path)
                 )
                 conn.commit()
                 return cursor.lastrowid
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            print(f"Error creating order: {e}")
             return None
 
-    def update_star_payment_status(self, payment_id: int, status: str,
-                                   telegram_payment_charge_id: str = None,
-                                   provider_payment_charge_id: str = None) -> bool:
-        """Обновить статус платежа Stars"""
+    def get_orders_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Получить заказы по статусу"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT id, user_id, username, product_id, amount, status, photo_path, created_at
+                FROM orders WHERE status = ? ORDER BY created_at DESC''',
+                (status,)
+            )
+            return [{
+                "id": row[0],
+                "user_id": row[1],
+                "username": row[2],
+                "product_id": row[3],
+                "amount": row[4],
+                "status": row[5],
+                "photo_path": row[6],
+                "created_at": row[7]
+            } for row in cursor.fetchall()]
 
-            if telegram_payment_charge_id and provider_payment_charge_id:
-                cursor.execute(
-                    '''UPDATE star_payments 
-                    SET status = ?, telegram_payment_charge_id = ?, provider_payment_charge_id = ?
-                    WHERE id = ?''',
-                    (status, telegram_payment_charge_id, provider_payment_charge_id, payment_id)
-                )
-            else:
-                cursor.execute(
-                    'UPDATE star_payments SET status = ? WHERE id = ?',
-                    (status, payment_id)
-                )
+    def get_all_orders(self) -> List[Dict[str, Any]]:
+        """Получить все заказы"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT id, user_id, username, product_id, amount, status, photo_path, created_at
+                FROM orders ORDER BY created_at DESC'''
+            )
+            return [{
+                "id": row[0],
+                "user_id": row[1],
+                "username": row[2],
+                "product_id": row[3],
+                "amount": row[4],
+                "status": row[5],
+                "photo_path": row[6],
+                "created_at": row[7]
+            } for row in cursor.fetchall()]
 
+    def get_order_by_id(self, order_id: int) -> Optional[Dict[str, Any]]:
+        """Получить заказ по ID"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''SELECT id, user_id, username, product_id, amount, status, photo_path, created_at
+                FROM orders WHERE id = ?''',
+                (order_id,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return {
+                    "id": result[0],
+                    "user_id": result[1],
+                    "username": result[2],
+                    "product_id": result[3],
+                    "amount": result[4],
+                    "status": result[5],
+                    "photo_path": result[6],
+                    "created_at": result[7]
+                }
+            return None
+
+    def update_order_status(self, order_id: int, status: str) -> bool:
+        """Обновить статус заказа"""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE orders SET status = ? WHERE id = ?',
+                (status, order_id)
+            )
             conn.commit()
             return cursor.rowcount > 0
 
-    def get_star_payment_by_id(self, payment_id: int) -> Optional[Dict[str, Any]]:
-        """Получить информацию о платеже Stars по ID"""
+    def delete_order(self, order_id: int) -> bool:
+        """Удалить заказ"""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                '''SELECT id, user_id, product_id, amount, telegram_payment_charge_id, 
-                provider_payment_charge_id, payload, created_at, status 
-                FROM star_payments WHERE id = ?''',
-                (payment_id,)
+                'DELETE FROM orders WHERE id = ?',
+                (order_id,)
             )
-            result = cursor.fetchone()
-            if result:
-                return {
-                    "id": result[0],
-                    "user_id": result[1],
-                    "product_id": result[2],
-                    "amount": result[3],
-                    "telegram_payment_charge_id": result[4],
-                    "provider_payment_charge_id": result[5],
-                    "payload": result[6],
-                    "created_at": result[7],
-                    "status": result[8]
-                }
-            return None
-
-    def get_star_payment_by_payload(self, payload: str) -> Optional[Dict[str, Any]]:
-        """Получить информацию о платеже Stars по payload"""
-        with sqlite3.connect(self.db_name) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                '''SELECT id, user_id, product_id, amount, telegram_payment_charge_id, 
-                provider_payment_charge_id, payload, created_at, status 
-                FROM star_payments WHERE payload = ?''',
-                (payload,)
-            )
-            result = cursor.fetchone()
-            if result:
-                return {
-                    "id": result[0],
-                    "user_id": result[1],
-                    "product_id": result[2],
-                    "amount": result[3],
-                    "telegram_payment_charge_id": result[4],
-                    "provider_payment_charge_id": result[5],
-                    "payload": result[6],
-                    "created_at": result[7],
-                    "status": result[8]
-                }
-            return None
-
+            conn.commit()
+            return cursor.rowcount > 0
 
 # Создаем глобальный экземпляр базы данных
 db = Database()
