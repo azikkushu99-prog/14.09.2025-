@@ -1,13 +1,14 @@
 import logging
 import asyncio
-import uuid
+import os
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
-from aiogram.types import FSInputFile, LabeledPrice, PreCheckoutQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import FSInputFile
 
 from db import db
 from admin import setup_admin_router
@@ -22,6 +23,12 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=storage)
 user_router = Router()
 
+
+# Состояние для ожидания чека
+class PaymentStates(StatesGroup):
+    WAITING_RECEIPT = State()
+
+
 setup_admin_router(dp)
 dp.include_router(user_router)
 
@@ -29,15 +36,15 @@ dp.include_router(user_router)
 def create_main_menu_keyboard():
     builder = InlineKeyboardBuilder()
     buttons = [
+        ("💳 Покупка через СБП", "sbp_categories"),
         ("📦 Покупка через оператора", "operator_categories"),
-        ("⭐ Покупка за звезды", "stars_categories"),
+        ("🎁 Акции и скидки", "promotions"),
         ("🏪 О магазине", "about_shop"),
-        ("🛟 Поддержка", "support"),
-        ("🎁 Акции и скидки", "promotions")
+        ("🛟 Поддержка", "support")
     ]
     for text, callback_data in buttons:
         builder.button(text=text, callback_data=callback_data)
-    builder.adjust(2)
+    builder.adjust(1)  # Изменено на 1 кнопку в строке
     return builder.as_markup()
 
 
@@ -53,11 +60,17 @@ def create_back_to_products_button(category_id, section_type):
     return builder.as_markup()
 
 
-def create_stars_payment_keyboard(product_id):
+def create_sbp_payment_keyboard(product_id):
     builder = InlineKeyboardBuilder()
-    builder.button(text="⭐ Купить за звезды", callback_data=f"buy_with_stars_{product_id}")
-    builder.button(text="⬅️ Назад к товарам", callback_data="stars_category_back")
+    builder.button(text="📸 Отправить фото чека", callback_data=f"send_receipt_{product_id}")
+    builder.button(text="⬅️ Назад к товарам", callback_data="sbp_category_back")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def create_close_request_keyboard(order_id):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Закрыть заявку", callback_data=f"close_request_{order_id}")
     return builder.as_markup()
 
 
@@ -81,34 +94,34 @@ async def process_callback(callback_query: types.CallbackQuery, state: FSMContex
     if callback_data.startswith('admin_'):
         logger.info(f"Admin callback received, skipping user handler: {callback_data}")
         return
-    if callback_data == 'stars_category_back':
-        await show_categories(callback_query, 'stars')
+    if callback_data == 'sbp_category_back':
+        await show_categories(callback_query, 'sbp')
         return
     if callback_data == 'operator_categories':
         await show_categories(callback_query, 'operator')
         return
-    if callback_data == 'stars_categories':
-        await show_categories(callback_query, 'stars')
+    if callback_data == 'sbp_categories':
+        await show_categories(callback_query, 'sbp')
         return
-    if callback_data.startswith('buy_with_stars_'):
-        product_id = int(callback_data.split('_')[3])
-        await process_stars_payment(callback_query, product_id)
+    if callback_data.startswith('send_receipt_'):
+        product_id = int(callback_data.split('_')[2])
+        await process_receipt_request(callback_query, product_id, state)
         return
     if callback_data.startswith('operator_category_'):
         category_id = int(callback_data.split('_')[2])
         await show_products(callback_query, category_id, 'operator')
         return
-    if callback_data.startswith('stars_category_'):
+    if callback_data.startswith('sbp_category_'):
         category_id = int(callback_data.split('_')[2])
-        await show_products(callback_query, category_id, 'stars')
+        await show_products(callback_query, category_id, 'sbp')
         return
     if callback_data.startswith('operator_product_'):
         product_id = int(callback_data.split('_')[2])
         await show_product_details(callback_query, product_id, 'operator')
         return
-    if callback_data.startswith('stars_product_'):
+    if callback_data.startswith('sbp_product_'):
         product_id = int(callback_data.split('_')[2])
-        await show_product_details(callback_query, product_id, 'stars')
+        await show_product_details(callback_query, product_id, 'sbp')
         return
     if callback_data in ['about_shop', 'promotions']:
         content = db.get_section_content(callback_data)
@@ -153,6 +166,9 @@ async def process_callback(callback_query: types.CallbackQuery, state: FSMContex
             await callback_query.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         await callback_query.answer()
         return
+    elif callback_data.startswith('close_request_'):
+        await close_request_handler(callback_query)
+        return
     else:
         text = "Неизвестная команда"
         reply_markup = create_back_button()
@@ -170,7 +186,7 @@ async def process_callback(callback_query: types.CallbackQuery, state: FSMContex
 
 async def show_categories(callback_query: types.CallbackQuery, section_type: str):
     categories = db.get_categories_by_section(section_type)
-    section_name = "Покупка через оператора" if section_type == 'operator' else "Покупка за звезды"
+    section_name = "Покупка через оператора" if section_type == 'operator' else "Покупка через СБП"
     if not categories:
         text = f"📦 <b>{section_name}</b>\n\nПока нет добавленных категорий."
         reply_markup = create_back_button()
@@ -196,7 +212,7 @@ async def show_categories(callback_query: types.CallbackQuery, section_type: str
 
 async def show_products(callback_query: types.CallbackQuery, category_id: int, section_type: str):
     category = db.get_category_by_id(category_id)
-    section_name = "Покупка через оператора" if section_type == 'operator' else "Покупка за звезды"
+    section_name = "Покупка через оператора" if section_type == 'operator' else "Покупка через СБП"
     if category:
         products = db.get_products_by_category_and_section(category_id, section_type)
         if not products:
@@ -216,7 +232,7 @@ async def show_products(callback_query: types.CallbackQuery, category_id: int, s
                     keyboard.button(text=f"{product['name']} - {product['price']} руб.",
                                     callback_data=f"{section_type}_product_{product['id']}")
                 else:
-                    keyboard.button(text=f"{product['name']} - {product['stars_price']} звёзд",
+                    keyboard.button(text=f"{product['name']} - {product['stars_price']} руб.",
                                     callback_data=f"{section_type}_product_{product['id']}")
             keyboard.button(text="⬅️ Назад к категориям", callback_data=f"{section_type}_categories")
             keyboard.adjust(1)
@@ -238,8 +254,25 @@ async def show_product_details(callback_query: types.CallbackQuery, product_id: 
             text = f"🛒 <b>{product['name']}</b>\n\n{product['description']}\n\n💵 Цена: {product['price']} руб.\n📦 Категория: {category['name'] if category else 'Неизвестно'}\n\n📸 <b>Для покупки:</b>\n1. Сделайте скриншот этого сообщения\n2. Отправьте его @sssofbot13"
             reply_markup = create_back_to_products_button(product['category_id'], section_type)
         else:
-            text = f"⭐ <b>{product['name']}</b>\n\n{product['description']}\n\n💫 Цена: {product['stars_price']} звёзд\n📦 Категория: {category['name'] if category else 'Неизвестно'}"
-            reply_markup = create_stars_payment_keyboard(product_id)
+            payment_details = """
+💳 <b>Оплата через СБП</b>
+
+Для оплаты переведите <b>{amount} руб.</b> на один из реквизитов:
+
+📞 <b>+79955478027</b>
+🔵 Озон Банк (Лучше сюда)  
+🔵 ВТБ Банк
+🟢 Сбер
+🟡 Т-Банк 
+🔴 Альфа 
+🟣 Яндекс 
+👤 <b>Софья Константиновна М.</b>
+
+После оплаты нажмите кнопку "📸 Отправить фото чека"
+""".format(amount=product['stars_price'])
+
+            text = f"💳 <b>{product['name']}</b>\n\n{product['description']}\n\n💫 Цена: {product['stars_price']} руб.\n📦 Категория: {category['name'] if category else 'Неизвестно'}\n\n{payment_details}"
+            reply_markup = create_sbp_payment_keyboard(product_id)
         try:
             await callback_query.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         except:
@@ -249,111 +282,116 @@ async def show_product_details(callback_query: types.CallbackQuery, product_id: 
     await callback_query.answer()
 
 
-async def process_stars_payment(callback_query: types.CallbackQuery, product_id: int):
+async def process_receipt_request(callback_query: types.CallbackQuery, product_id: int, state: FSMContext):
     product = db.get_product_by_id(product_id)
-    user_id = callback_query.from_user.id
-    if not product or product['stars_price'] <= 0:
-        await callback_query.answer("❌ Этот товар нельзя купить за звезды.")
-        return
-    payload = str(uuid.uuid4())
-    payment_id = db.create_star_payment(user_id=user_id, product_id=product_id, amount=product['stars_price'],
-                                        payload=payload)
-    if not payment_id:
-        await callback_query.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
-        return
 
-    prices = [LabeledPrice(label=product['name'], amount=product['stars_price'])]
-
-    try:
-        await bot.send_invoice(
-            chat_id=callback_query.message.chat.id,
-            title=product['name'],
-            description=f"Оплата {product['stars_price']} звёзд",
-            payload=payload,
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-            start_parameter="create_invoice_stars",
-            need_name=False,
-            need_phone_number=False,
-            need_email=False,
-            need_shipping_address=False,
-            is_flexible=False
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при отправке инвойса: {e}")
-        await callback_query.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
-        db.update_star_payment_status(payment_id, "failed")
+    if product:
+        await state.set_state(PaymentStates.WAITING_RECEIPT)
+        await state.update_data(product_id=product_id)
+        await callback_query.message.answer("Пожалуйста, отправьте фото чека об оплате.")
+    else:
+        await callback_query.answer("Товар не найден.")
 
     await callback_query.answer()
 
 
-@user_router.pre_checkout_query()
-async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
-    try:
-        payment = db.get_star_payment_by_payload(pre_checkout_query.invoice_payload)
-        if not payment:
-            await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message="Платеж не найден")
-            return
-        product = db.get_product_by_id(payment['product_id'])
-        if not product or product['stars_price'] <= 0:
-            await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False,
-                                                error_message="Товар больше не доступен")
-            return
-        await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-    except Exception as e:
-        logger.error(f"Ошибка при обработке pre-checkout запроса: {e}")
-        await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False,
-                                            error_message="Произошла ошибка при обработке платежа")
+@user_router.message(PaymentStates.WAITING_RECEIPT, F.photo)
+async def handle_receipt_photo(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    product_id = user_data.get('product_id')
+    product = db.get_product_by_id(product_id)
 
+    if product:
+        # Создаем папку для чеков, если её нет
+        os.makedirs("receipts", exist_ok=True)
 
-@user_router.message(F.successful_payment)
-async def process_successful_payment(message: types.Message):
-    try:
-        successful_payment = message.successful_payment
-        user_id = message.from_user.id
+        # Сохраняем фото чека
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
 
-        payment = db.get_star_payment_by_payload(successful_payment.invoice_payload)
-        if not payment:
-            logger.error(f"Платеж не найден для payload: {successful_payment.invoice_payload}")
-            await message.answer("❌ Произошла ошибка при обработке вашего платежа. Обратитесь в поддержку.")
-            return
+        # Формируем путь для сохранения
+        photo_filename = f"receipts/{message.from_user.id}_{message.message_id}.jpg"
+        await bot.download_file(file_path, photo_filename)
 
-        db.update_star_payment_status(
-            payment_id=payment['id'],
-            status="completed",
-            telegram_payment_charge_id=successful_payment.telegram_payment_charge_id,
-            provider_payment_charge_id=successful_payment.provider_payment_charge_id
+        # Создаем заказ в базе данных
+        order_id = db.create_order(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            product_id=product_id,
+            amount=product['stars_price'],
+            photo_path=photo_filename,
+            status='pending'
         )
 
-        product = db.get_product_by_id(payment['product_id'])
-        if not product:
-            logger.error(f"Товар не найден для payment: {payment}")
-            await message.answer("❌ Произошла ошибка при обработке вашего платежа. Обратитесь в поддержку.")
+        if not order_id:
+            await message.answer("❌ Произошла ошибка при обработке чека. Попробуйте позже.")
+            await state.clear()
             return
 
-        success_text = f"""
-🎉 <b>Покупка успешно завершена!</b>
+        # Получаем информацию о категории
+        category = db.get_category_by_id(product['category_id'])
+        category_name = category['name'] if category else 'Неизвестно'
 
-Вы приобрели: <b>{product['name']}</b>
-Стоимость: <b>{successful_payment.total_amount} звёзд</b>
-"""
-        await message.answer(success_text, parse_mode=ParseMode.HTML)
+        # Отправляем фото чека админам
+        admin_ids = [785219206, 1927067668]  # ID админов
+        for admin_id in admin_ids:
+            try:
+                caption = (
+                    f"🆕 Новая заявка на оплату\n\n"
+                    f"👤 Пользователь: @{message.from_user.username}\n"
+                    f"📦 Категория: {category_name}\n"
+                    f"🛒 Товар: {product['name']}\n"
+                    f"💵 Сумма: {product['stars_price']} руб.\n"
+                    f"🕒 Время: {message.date.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
 
-        if product.get('activation_instruction'):
-            instruction_text = f"""
-📋 <b>Инструкция для активации:</b>
-{product['activation_instruction']}
+                await bot.send_photo(
+                    chat_id=admin_id,
+                    photo=FSInputFile(photo_filename),
+                    caption=caption,
+                    reply_markup=create_close_request_keyboard(order_id)
+                )
+            except Exception as e:
+                logger.error(f"Не удалось отправить сообщение админу {admin_id}: {e}")
 
-💫 <i>Спасибо за покупку! Если возникнут проблемы, обратитесь в поддержку.</i>
-"""
-            await message.answer(instruction_text, parse_mode=ParseMode.HTML)
-        else:
-            await message.answer("❌ Инструкция по активации не найдена. Пожалуйста, обратитесь в поддержку @sssofbot13")
+        # Отправляем подтверждение пользователю
+        await message.answer("✅ Ваш заказ успешно оплачен, ожидайте обратной связи от @sssofbot13☺️")
+    else:
+        await message.answer("❌ Произошла ошибка. Товар не найден.")
 
-    except Exception as e:
-        logger.error(f"Ошибка при обработке успешного платежа: {e}", exc_info=True)
-        await message.answer("❌ Произошла ошибка при обработке вашего платежа. Обратитесь в поддержку.")
+    await state.clear()
+
+
+@user_router.message(PaymentStates.WAITING_RECEIPT)
+async def handle_wrong_receipt(message: types.Message):
+    await message.answer("Пожалуйста, отправьте фото чека об оплате.")
+
+
+async def close_request_handler(callback_query: types.CallbackQuery):
+    order_id = int(callback_query.data.split('_')[2])
+
+    # Получаем заказ из базы данных
+    order = db.get_order_by_id(order_id)
+    if not order:
+        await callback_query.answer("Заявка не найдена")
+        return
+
+    # Удаляем файл чека, если он существует
+    if order['photo_path'] and os.path.exists(order['photo_path']):
+        try:
+            os.remove(order['photo_path'])
+        except Exception as e:
+            logger.error(f"Ошибка при удалении файла чека: {e}")
+
+    # Удаляем заказ из базы данных
+    if db.delete_order(order_id):
+        # Удаляем сообщение с заявкой
+        await callback_query.message.delete()
+        await callback_query.answer("Заявка успешно закрыта")
+    else:
+        await callback_query.answer("❌ Ошибка при закрытии заявки")
 
 
 @user_router.message()
