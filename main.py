@@ -378,15 +378,8 @@ async def close_request_handler(callback_query: types.CallbackQuery):
         await callback_query.answer("Заявка не найдена")
         return
 
-    # Удаляем файл чека, если он существует
-    if order['photo_path'] and os.path.exists(order['photo_path']):
-        try:
-            os.remove(order['photo_path'])
-        except Exception as e:
-            logger.error(f"Ошибка при удалении файла чека: {e}")
-
-    # Удаляем заказ из базы данных
-    if db.delete_order(order_id):
+    # Меняем статус заказа на 'closed' вместо удаления
+    if db.update_order_status(order_id, 'closed'):
         # Удаляем сообщение с заявкой
         await callback_query.message.delete()
         await callback_query.answer("Заявка успешно закрыта")
