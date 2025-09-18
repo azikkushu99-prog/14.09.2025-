@@ -36,10 +36,10 @@ dp.include_router(user_router)
 def create_main_menu_keyboard():
     builder = InlineKeyboardBuilder()
     buttons = [
+        ("📦 Наличие товаров", "about_shop"),
         ("💳 Покупка через СБП", "sbp_categories"),
         ("📦 Покупка через оператора", "operator_categories"),
         ("🎁 Акции и скидки", "promotions"),
-        ("🏪 О магазине", "about_shop"),
         ("🛟 Поддержка", "support")
     ]
     for text, callback_data in buttons:
