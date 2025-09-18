@@ -65,7 +65,7 @@ def create_main_menu_keyboard():
     buttons = [
         ("📦 Покупка через оператора", "operator_categories"),
         ("💳 Покупка через СБП", "sbp_categories"),
-        ("🏪 О магазине", "about_shop"),
+        ("📦 Наличие товаров", "about_shop"),
         ("🛟 Поддержка", "support"),
         ("🎁 Акции и скидки", "promotions")
     ]
@@ -120,7 +120,7 @@ async def show_admin_menu(message: types.Message = None, callback_query: types.C
 Выберите действие:
 """
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="🏪 Редактировать 'О магазине'", callback_data="admin_edit_about_shop")
+    keyboard.button(text="📦 Редактировать 'Наличие товаров'", callback_data="admin_edit_about_shop")
     keyboard.button(text="🎁 Редактировать 'Акции и скидки'", callback_data="admin_edit_promotions")
     keyboard.button(text="➕ Добавить категорию", callback_data="admin_add_category")
     keyboard.button(text="🛒 Добавить товар", callback_data="admin_add_product")
@@ -160,8 +160,9 @@ async def admin_callback_handler(callback_query: types.CallbackQuery, state: FSM
         await state.set_state(AdminStates.EDIT_SECTION_TEXT)
 
         content = db.get_section_content(section)
+        section_name = "Наличие товаров" if section == "about_shop" else "Акции и скидки"
         await callback_query.message.edit_text(
-            f"📝 <b>Редактирование '{'О магазине' if section == 'about_shop' else 'Акции и скидки'}'</b>\n\n"
+            f"📝 <b>Редактирование '{section_name}'</b>\n\n"
             f"Текущее содержание:\n{content}\n\n"
             "Отправьте новый текст:",
             parse_mode=ParseMode.HTML,
@@ -191,7 +192,7 @@ async def show_pending_orders(callback_query: types.CallbackQuery):
 
     if not orders:
         await callback_query.message.edit_text(
-            "📄 <b>Открытые заявки</b>\n\nНа данный момент открытых заявок нет.",
+            "📄 <b>Открыные заявки</b>\n\nНа данный момент открытых заявок нет.",
             parse_mode=ParseMode.HTML,
             reply_markup=create_back_to_admin_menu_keyboard()
         )
@@ -320,13 +321,15 @@ async def edit_section_photo_handler(message: types.Message, state: FSMContext):
         # Сохраняем путь к фото в БД
         db.update_section_photo(section, photo_path)
 
+        section_name = "Наличие товаров" if section == "about_shop" else "Акции и скидки"
         await message.answer(
-            f"✅ Раздел '{'О магазине' if section == 'about_shop' else 'Акции и скидки'}' успешно обновлен с новым текстом и фото!",
+            f"✅ Раздел '{section_name}' успешно обновлен с новым текстом и фото!",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
     else:
+        section_name = "Наличие товаров" if section == "about_shop" else "Акции и скидки"
         await message.answer(
-            f"✅ Раздел '{'О магазине' if section == 'about_shop' else 'Акции и скидки'}' успешно обновлен с новым текстом!",
+            f"✅ Раздел '{section_name}' успешно обновлен с новым текстом!",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
 
@@ -346,8 +349,9 @@ async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMCont
     # Сохраняем только текст
     db.update_section_content(section, new_content)
 
+    section_name = "Наличие товаров" if section == "about_shop" else "Акции и скидки"
     await callback_query.message.edit_text(
-        f"✅ Раздел '{'О магазине' if section == 'about_shop' else 'Акции и скидки'}' успешно обновлен с новым текстом!",
+        f"✅ Раздел '{section_name}' успешно обновлен с новым текстом!",
         reply_markup=create_back_to_admin_menu_keyboard()
     )
 
@@ -441,7 +445,7 @@ async def add_product_section_handler(callback_query: types.CallbackQuery, state
     keyboard.adjust(1)
 
     await callback_query.message.edit_text(
-        "📦 Выберите категорию для товара:",
+        "📦 Выберите категорие для товара:",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard.as_markup()
     )
