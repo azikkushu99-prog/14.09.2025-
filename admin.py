@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -28,6 +29,7 @@ class AdminStates(StatesGroup):
     ADD_PRODUCT_NAME = State()
     ADD_PRODUCT_PRICE = State()
     ADD_PRODUCT_SBP_PRICE = State()
+    ADD_PRODUCT_DESCRIPTION = State()
     ADD_PRODUCT_SECTION = State()
     EDIT_SECTION_TEXT = State()
     EDIT_SECTION_PHOTO = State()
@@ -81,6 +83,13 @@ def create_close_request_keyboard(order_id):
     return builder.as_markup()
 
 
+def create_skip_description_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="🚫 Не добавлять описание", callback_data="admin_skip_description")
+    keyboard.adjust(1)
+    return keyboard.as_markup()
+
+
 def setup_admin_router(dp: Dispatcher):
     dp.include_router(admin_router)
 
@@ -88,6 +97,7 @@ def setup_admin_router(dp: Dispatcher):
     admin_router.callback_query.register(cancel_edit_handler, F.data == "admin_cancel_edit")
     admin_router.callback_query.register(skip_photo_handler, F.data == "admin_skip_photo")
     admin_router.callback_query.register(delete_photo_handler, F.data == "admin_delete_photo")
+    admin_router.callback_query.register(skip_description_handler, F.data == "admin_skip_description")
     admin_router.callback_query.register(add_product_category_handler, F.data.startswith("admin_add_product_category_"))
     admin_router.callback_query.register(delete_category_handler, F.data.startswith("admin_delete_category_"))
     admin_router.callback_query.register(manage_products_handler, F.data.startswith("admin_manage_products_"))
@@ -95,12 +105,14 @@ def setup_admin_router(dp: Dispatcher):
     admin_router.callback_query.register(add_product_section_handler, F.data.startswith("admin_product_section_"))
     admin_router.callback_query.register(add_category_section_handler, F.data.startswith("admin_section_"))
     admin_router.callback_query.register(admin_callback_handler, F.data.startswith("admin_"))
+    admin_router.callback_query.register(show_closed_orders_handler, F.data == "admin_closed_orders")
 
     admin_router.message.register(admin_command, Command("admin"))
     admin_router.message.register(add_category_name_handler, AdminStates.ADD_CATEGORY_NAME)
     admin_router.message.register(add_product_name_handler, AdminStates.ADD_PRODUCT_NAME)
     admin_router.message.register(add_product_price_handler, AdminStates.ADD_PRODUCT_PRICE)
     admin_router.message.register(add_product_sbp_price_handler, AdminStates.ADD_PRODUCT_SBP_PRICE)
+    admin_router.message.register(add_product_description_handler, AdminStates.ADD_PRODUCT_DESCRIPTION)
     admin_router.message.register(edit_section_text_handler, AdminStates.EDIT_SECTION_TEXT)
     admin_router.message.register(edit_section_photo_handler, AdminStates.EDIT_SECTION_PHOTO)
 
@@ -127,6 +139,7 @@ async def show_admin_menu(message: types.Message = None, callback_query: types.C
     keyboard.button(text="🗑️ Удаление категорий", callback_data="admin_manage_categories")
     keyboard.button(text="🗑️ Удаление товаров", callback_data="admin_manage_products")
     keyboard.button(text="📄 Открытые заявки", callback_data="admin_pending_orders")
+    keyboard.button(text="📂 Закрытые заявки", callback_data="admin_closed_orders")
     keyboard.button(text="⬅️ Назад в главное меню", callback_data="admin_back_to_main")
     keyboard.adjust(1)
 
@@ -184,6 +197,9 @@ async def admin_callback_handler(callback_query: types.CallbackQuery, state: FSM
     elif action == "admin_pending_orders":
         await show_pending_orders(callback_query)
 
+    elif action == "admin_closed_orders":
+        await show_closed_orders_handler(callback_query)
+
     await callback_query.answer()
 
 
@@ -229,6 +245,88 @@ async def show_pending_orders(callback_query: types.CallbackQuery):
             )
 
     await callback_query.answer("Все открытые заявки отправлены")
+
+
+async def show_closed_orders_handler(callback_query: types.CallbackQuery):
+    # Сначала удаляем старые заявки (старше 7 дней)
+    deleted_count = delete_old_closed_orders(7)
+
+    orders = db.get_orders_by_status('closed')
+
+    if not orders:
+        await callback_query.message.edit_text(
+            "📂 <b>Закрытые заявки</b>\n\nНа данный момент закрытых заявок нет.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=create_back_to_admin_menu_keyboard()
+        )
+        return
+
+    # Отправляем сообщение о количестве удаленных заявок
+    if deleted_count > 0:
+        await callback_query.message.answer(
+            f"🗑️ <b>Автоматически удалено {deleted_count} старых заявок</b>",
+            parse_mode=ParseMode.HTML
+        )
+
+    # Отправляем каждую закрытую заявку отдельным сообщением с фото
+    for order in orders:
+        product = db.get_product_by_id(order['product_id'])
+        category = db.get_category_by_id(product['category_id']) if product else None
+        category_name = category['name'] if category else 'Неизвестно'
+
+        caption = (
+            f"🔒 <b>Закрытая заявка #{order['id']}</b>\n\n"
+            f"👤 Пользователь: @{order['username']}\n"
+            f"📦 Категория: {category_name}\n"
+            f"🛒 Товар: {product['name'] if product else 'Неизвестно'}\n"
+            f"💵 Сумма: {order['amount']} руб.\n"
+            f"🕒 Время: {order['created_at']}"
+        )
+
+        # Отправляем фото чека, если оно есть
+        if order['photo_path'] and os.path.exists(order['photo_path']):
+            await callback_query.message.answer_photo(
+                photo=FSInputFile(order['photo_path']),
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await callback_query.message.answer(
+                caption,
+                parse_mode=ParseMode.HTML
+            )
+
+    # Добавляем кнопку возврата в конце
+    await callback_query.message.answer(
+        "📂 <b>Просмотр закрытых заявок завершен</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=create_back_to_admin_menu_keyboard()
+    )
+
+    await callback_query.answer("Все закрытые заявки отправлены")
+
+
+def delete_old_closed_orders(days: int):
+    """Удаляет закрытые заявки старше указанного количества дней"""
+    closed_orders = db.get_orders_by_status('closed')
+    deleted_count = 0
+    cutoff_date = datetime.now() - timedelta(days=days)
+
+    for order in closed_orders:
+        order_date = datetime.strptime(order['created_at'], '%Y-%m-%d %H:%M:%S')
+        if order_date < cutoff_date:
+            # Удаляем файл чека, если он существует
+            if order['photo_path'] and os.path.exists(order['photo_path']):
+                try:
+                    os.remove(order['photo_path'])
+                except Exception as e:
+                    logger.error(f"Ошибка при удалении файла чека: {e}")
+
+            # Удаляем заказ из базы данных
+            if db.delete_order(order['id']):
+                deleted_count += 1
+
+    return deleted_count
 
 
 async def cancel_edit_handler(callback_query: types.CallbackQuery, state: FSMContext):
@@ -329,7 +427,7 @@ async def edit_section_photo_handler(message: types.Message, state: FSMContext):
     else:
         section_name = "Наличие товаров" if section == "about_shop" else "Акции и скидки"
         await message.answer(
-            f"✅ Раздел '{section_name}' успешно обновлен с новым текстом!",
+            f"✅ Раздел '{section_name}' успешно обновлен с новым текстам!",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
 
@@ -351,7 +449,7 @@ async def skip_photo_handler(callback_query: types.CallbackQuery, state: FSMCont
 
     section_name = "Наличие товаров" if section == "about_shop" else "Акции и скидки"
     await callback_query.message.edit_text(
-        f"✅ Раздел '{section_name}' успешно обновлен с новым текстом!",
+        f"✅ Раздел '{section_name}' успешно обновлен с новым текстам!",
         reply_markup=create_back_to_admin_menu_keyboard()
     )
 
@@ -506,76 +604,82 @@ async def add_product_name_handler(message: types.Message, state: FSMContext):
 async def add_product_price_handler(message: types.Message, state: FSMContext):
     try:
         price = float(message.text)
-        user_data = await state.get_data()
+        await state.update_data(product_price=price)
 
-        name = user_data.get('product_name')
-        category_id = user_data.get('product_category_id')
-        section = user_data.get('product_section')
-
-        if category_id is None or section is None:
-            await message.answer(
-                "❌ Не выбрана категория или раздел. Попробуйте добавить товар еще раз.",
-                reply_markup=create_back_to_admin_menu_keyboard()
-            )
-            await state.clear()
-            return
-
-        if db.add_product(name, "", price, 0, category_id, None, section):
-            await message.answer(
-                f"✅ Товар '{name}' успешно добавлен в категорию!",
-                reply_markup=create_back_to_admin_menu_keyboard()
-            )
-        else:
-            await message.answer(
-                "❌ Не удалось добавить товар в базу данных.",
-                reply_markup=create_back_to_admin_menu_keyboard()
-            )
+        await message.answer(
+            "📝 Введите описание товара (или нажмите кнопку чтобы пропустить):",
+            reply_markup=create_skip_description_keyboard()
+        )
+        await state.set_state(AdminStates.ADD_PRODUCT_DESCRIPTION)
     except ValueError:
         await message.answer(
             "❌ Неверный формат цены. Введите число:",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении товара: {e}")
-        await message.answer(
-            "❌ Произошла ошибка при добавлении товара.",
-            reply_markup=create_back_to_admin_menu_keyboard()
-        )
-
-    await state.clear()
 
 
 async def add_product_sbp_price_handler(message: types.Message, state: FSMContext):
     try:
         sbp_price = int(message.text)
-        user_data = await state.get_data()
+        await state.update_data(product_stars_price=sbp_price)
 
-        name = user_data.get('product_name')
-        category_id = user_data.get('product_category_id')
-        section = user_data.get('product_section')
-
-        if db.add_product(name, "", 0, sbp_price, category_id, None, section):
-            await message.answer(
-                f"✅ Товар '{name}' успешно добавлен в раздел 'Покупка через СБП'!\n"
-                f"💳 Цена: {sbp_price} руб.",
-                reply_markup=create_back_to_admin_menu_keyboard()
-            )
-        else:
-            await message.answer(
-                "❌ Не удалось добавить товар в базу данных.",
-                reply_markup=create_back_to_admin_menu_keyboard()
-            )
+        await message.answer(
+            "📝 Введите описание товара (или нажмите кнопку чтобы пропустить):",
+            reply_markup=create_skip_description_keyboard()
+        )
+        await state.set_state(AdminStates.ADD_PRODUCT_DESCRIPTION)
     except ValueError:
         await message.answer(
             "❌ Неверный формат цена. Введите целое число:",
             reply_markup=create_back_to_admin_menu_keyboard()
         )
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении товара: {e}")
-        await message.answer(
-            "❌ Произошла ошибка при добавлении товара.",
-            reply_markup=create_back_to_admin_menu_keyboard()
-        )
+
+
+async def add_product_description_handler(message: types.Message, state: FSMContext):
+    description = message.text
+    await process_product_description(message, state, description)
+
+
+async def skip_description_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    await process_product_description(callback_query, state, "")
+
+
+async def process_product_description(message_or_callback, state: FSMContext, description: str):
+    user_data = await state.get_data()
+
+    name = user_data.get('product_name')
+    category_id = user_data.get('product_category_id')
+    section = user_data.get('product_section')
+
+    if section == "operator":
+        price = user_data.get('product_price', 0)
+        stars_price = 0
+    else:
+        price = 0
+        stars_price = user_data.get('product_stars_price', 0)
+
+    if db.add_product(name, description, price, stars_price, category_id, None, section):
+        if isinstance(message_or_callback, types.Message):
+            await message_or_callback.answer(
+                f"✅ Товар '{name}' успешно добавлен!",
+                reply_markup=create_back_to_admin_menu_keyboard()
+            )
+        else:
+            await message_or_callback.message.edit_text(
+                f"✅ Товар '{name}' успешно добавлен!",
+                reply_markup=create_back_to_admin_menu_keyboard()
+            )
+    else:
+        if isinstance(message_or_callback, types.Message):
+            await message_or_callback.answer(
+                "❌ Не удалось добавить товар в базу данных.",
+                reply_markup=create_back_to_admin_menu_keyboard()
+            )
+        else:
+            await message_or_callback.message.edit_text(
+                "❌ Не удалось добавить товар в базу данных.",
+                reply_markup=create_back_to_admin_menu_keyboard()
+            )
 
     await state.clear()
 
@@ -646,21 +750,21 @@ async def show_products_management(callback_query: types.CallbackQuery):
 
     if not categories:
         await callback_query.message.edit_text(
-            "🗑️ <b>Удаление товары</b>\n\n"
+            "🗑️ <b>Удаление товары</b>\極\n\n"
             "Пока нет добавленных категорий.",
             parse_mode=ParseMode.HTML,
             reply_markup=create_back_to_admin_menu_keyboard()
         )
         return
 
-    text = "🗑️ <b>Удаление товаров</b>\n\nВыберите категорию для управления товарами:\n\n"
+    text = "🗑️ <極>Удаление товаров</b>\n\nВыберите категорие для управления товарами:\n\n"
     keyboard = InlineKeyboardBuilder()
 
     for category in categories:
         products = db.get_products_by_category(category['id'])
         section_name = "оператора" if category['section'] == 'operator' else "СБП"
         text += f"📦 {category['name']} (раздел: {section_name}, {len(products)} товаров)\n"
-        keyboard.button(text=f"📋 {category['name']}", callback_data=f"admin_manage_products_{category['id']}")
+        keyboard.button(text=f"📋 {category['極']}", callback_data=f"admin_manage_products_{category['id']}")
 
     keyboard.button(text="⬅️ Назад", callback_data="admin_back")
     keyboard.adjust(1)
@@ -703,7 +807,7 @@ async def manage_products_handler(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=keyboard.as_markup()
+        reply_markup=keyboard.as極arkup()
     )
 
 
