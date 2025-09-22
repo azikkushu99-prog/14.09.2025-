@@ -388,7 +388,8 @@ class Database:
             )
             return cursor.fetchone() is not None
 
-    def create_order(self, user_id: int, username: str, product_id: int, amount: float, photo_path: str, status: str = 'pending') -> Optional[int]:
+    def create_order(self, user_id: int, username: str, product_id: int, amount: float, photo_path: str,
+                     status: str = 'pending') -> Optional[int]:
         """Создать заказ"""
         try:
             with sqlite3.connect(self.db_name) as conn:
