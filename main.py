@@ -315,10 +315,17 @@ async def handle_receipt_photo(message: types.Message, state: FSMContext):
         photo_filename = f"receipts/{message.from_user.id}_{message.message_id}.jpg"
         await bot.download_file(file_path, photo_filename)
 
+        # Формируем информацию о пользователе
+        username = message.from_user.username
+        if username:
+            user_display = f"@{username}"
+        else:
+            user_display = f"{message.from_user.first_name} (ID: {message.from_user.id})"
+
         # Создаем заказ в базе данных
         order_id = db.create_order(
             user_id=message.from_user.id,
-            username=message.from_user.username,
+            username=user_display,  # Используем отформатированное имя
             product_id=product_id,
             amount=product['stars_price'],
             photo_path=photo_filename,
@@ -340,7 +347,7 @@ async def handle_receipt_photo(message: types.Message, state: FSMContext):
             try:
                 caption = (
                     f"🆕 Новая заявка на оплату\n\n"
-                    f"👤 Пользователь: @{message.from_user.username}\n"
+                    f"👤 Пользователь: {user_display}\n"  # Используем отформатированное имя
                     f"📦 Категория: {category_name}\n"
                     f"🛒 Товар: {product['name']}\n"
                     f"💵 Сумма: {product['stars_price']} руб.\n"
