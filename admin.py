@@ -208,7 +208,7 @@ async def show_pending_orders(callback_query: types.CallbackQuery):
 
     if not orders:
         await callback_query.message.edit_text(
-            "📄 <b>Открыные заявки</b>\n\nНа данный момент открытых заявок нет.",
+            "📄 <b>Открытые заявки</b>\n\nНа данный момент открытых заявок нет.",
             parse_mode=ParseMode.HTML,
             reply_markup=create_back_to_admin_menu_keyboard()
         )
@@ -220,9 +220,10 @@ async def show_pending_orders(callback_query: types.CallbackQuery):
         category = db.get_category_by_id(product['category_id']) if product else None
         category_name = category['name'] if category else 'Неизвестно'
 
+        # Используем сохраненное имя пользователя из базы данных
         caption = (
             f"📄 <b>Заявка #{order['id']}</b>\n\n"
-            f"👤 Пользователь: @{order['username']}\n"
+            f"👤 Пользователь: {order['username']}\n"  # Уже отформатировано в основном коде
             f"📦 Категория: {category_name}\n"
             f"🛒 Товар: {product['name'] if product else 'Неизвестно'}\n"
             f"💵 Сумма: {order['amount']} руб.\n"
@@ -274,9 +275,10 @@ async def show_closed_orders_handler(callback_query: types.CallbackQuery):
         category = db.get_category_by_id(product['category_id']) if product else None
         category_name = category['name'] if category else 'Неизвестно'
 
+        # Используем сохраненное имя пользователя из базы данных
         caption = (
             f"🔒 <b>Закрытая заявка #{order['id']}</b>\n\n"
-            f"👤 Пользователь: @{order['username']}\n"
+            f"👤 Пользователь: {order['username']}\n"  # Уже отформатировано в основном коде
             f"📦 Категория: {category_name}\n"
             f"🛒 Товар: {product['name'] if product else 'Неизвестно'}\n"
             f"💵 Сумма: {order['amount']} руб.\n"
@@ -750,21 +752,21 @@ async def show_products_management(callback_query: types.CallbackQuery):
 
     if not categories:
         await callback_query.message.edit_text(
-            "🗑️ <b>Удаление товары</b>\極\n\n"
+            "🗑️ <b>Удаление товаров</b>\n\n"
             "Пока нет добавленных категорий.",
             parse_mode=ParseMode.HTML,
             reply_markup=create_back_to_admin_menu_keyboard()
         )
         return
 
-    text = "🗑️ <極>Удаление товаров</b>\n\nВыберите категорие для управления товарами:\n\n"
+    text = "🗑️ <b>Удаление товаров</b>\n\nВыберите категорию для управления товарами:\n\n"
     keyboard = InlineKeyboardBuilder()
 
     for category in categories:
         products = db.get_products_by_category(category['id'])
         section_name = "оператора" if category['section'] == 'operator' else "СБП"
         text += f"📦 {category['name']} (раздел: {section_name}, {len(products)} товаров)\n"
-        keyboard.button(text=f"📋 {category['極']}", callback_data=f"admin_manage_products_{category['id']}")
+        keyboard.button(text=f"📋 {category['name']}", callback_data=f"admin_manage_products_{category['id']}")
 
     keyboard.button(text="⬅️ Назад", callback_data="admin_back")
     keyboard.adjust(1)
@@ -807,7 +809,7 @@ async def manage_products_handler(callback_query: types.CallbackQuery):
     await callback_query.message.edit_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=keyboard.as極arkup()
+        reply_markup=keyboard.as_markup()
     )
 
 
@@ -824,6 +826,7 @@ async def delete_product_handler(callback_query: types.CallbackQuery):
         else:
             await callback_query.message.edit_text(
                 "❌ Не удалось удалить товар.",
+                reply_markup=create_back_to_admin_menu_keyboard()
             )
     else:
         await callback_query.message.edit_text(
